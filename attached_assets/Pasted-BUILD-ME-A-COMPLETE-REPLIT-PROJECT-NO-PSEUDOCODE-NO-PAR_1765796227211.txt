@@ -1,0 +1,262 @@
+BUILD ME A COMPLETE REPLIT PROJECT. NO PSEUDOCODE. NO PARTIALS.
+
+Project name: Master Moderator 101
+Stack:
+- Node.js (CommonJS)
+- Telegraf (Telegram bot)
+- Supabase (Postgres)
+- Express (web admin dashboard)
+- dotenv
+
+GOAL
+A Telegram verification bot that:
+- Locks down new users immediately (restrict from sending)
+- Gives 5 minutes + 3 attempts
+- Verification passes ONLY if:
+  A) user uploads at least 5 NON-FORWARDED videos related to group subject
+  OR
+  B) user submits a UNIQUE cloud FOLDER link (Google Drive/Dropbox/MEGA) never used in that group before
+- On fail (3rd attempt) OR timeout: ban user
+- Save ALL submissions and outcomes permanently to Supabase
+- Admins can change rules without redeploying
+- Add manual admin approval buttons + web dashboard
+
+========================
+FILE STRUCTURE (REQUIRED)
+========================
+Create these files:
+
+/index.js
+/package.json
+/.env.example
+/README.md
+/schema.sql
+
+/src/bot.js
+/src/db.js
+/src/rules.js
+/src/sessions.js
+/src/verification.js
+/src/linkValidation.js
+/src/adminCommands.js
+/src/adminButtons.js
+/src/exports.js
+
+/src/web/server.js
+/src/web/auth.js
+/src/web/pages.js
+
+========================
+DATABASE (SUPABASE) REQUIREMENTS
+========================
+Generate schema.sql that creates:
+
+1) groups table (per-group profile)
+- group_id (text, pk)
+- group_title (text)
+- subject (text)  // short description of what “on-topic” means
+- created_at
+
+2) verification_rules table (per-group config)
+- group_id (text, pk fk groups)
+- required_videos int default 5
+- allow_links boolean default true
+- allowed_hosts text[] default ['google','dropbox','mega']
+- max_attempts int default 3
+- timeout_ms int default 300000
+- welcome_message text
+- success_message text
+- failure_message text
+- require_manual_approval boolean default false
+- updated_at
+
+3) verification_sessions table (survive restarts)
+- group_id text
+- user_id text
+- status text default 'pending'  // pending|verified|banned|needs_review
+- attempts_used int default 0
+- videos text[] default {}
+- link text null
+- expires_at timestamptz
+- created_at_ms bigint
+- updated_at_ms bigint
+Primary key (group_id,user_id)
+
+4) verifications table (immutable log)
+- id bigserial pk
+- group_id text
+- user_id text
+- username text null
+- display_name text null
+- status text  // verified|banned|needs_review
+- method text null  // videos|link|null
+- attempts_used int
+- videos text[] default {}
+- link text null
+- failure_reason text null
+- admin_override text null  // approved_by_admin / rejected_by_admin / null
+- created_at timestamptz default now()
+
+5) whitelist table
+- group_id text
+- user_id text
+PK (group_id,user_id)
+
+6) admin_actions table (audit)
+- id bigserial pk
+- group_id text
+- admin_id text
+- target_user_id text null
+- action text
+- detail text null
+- created_at timestamptz default now()
+
+Indexes:
+- unique link per group in verifications WHERE link not null
+- quick lookup by group_id, user_id
+
+========================
+VERIFICATION DETAILS (STRICT)
+========================
+On new_chat_members:
+- create group row if missing
+- ensure rules row exists; if missing insert defaults
+- restrict user immediately (mute)
+- create/replace verification_session
+- send welcome message including:
+  - subject of group (from groups.subject)
+  - requirements
+  - time limit and attempts
+  - note: forwarded content not accepted
+
+Validation rules:
+- Any forwarded message (video or otherwise) is invalid and consumes an attempt
+- VIDEO method:
+  - accept only msg.video (not animation/gif)
+  - track file_id list
+  - pass when count >= required_videos
+- LINK method:
+  - accept only if allow_links true
+  - host must be google OR dropbox OR mega
+  - must LOOK like a folder link using regex heuristics:
+    Google Drive: /drive/folders/<id> or folderview?id=<id>
+    Dropbox: /sh/<id>/<token> (treat as folder share)
+    MEGA: /folder/<id>#<key> or #F!<id>!<key>
+  - reject non-folder links
+  - check uniqueness: link cannot already exist in verifications for same group_id
+- Any other message is invalid and consumes an attempt
+
+Failure:
+- attempts_used reaches max_attempts => ban user, log failure_reason, delete session
+- expires_at passed => ban, log failure_reason timeout, delete session
+
+Success:
+- unrestrict user (allow sending)
+- log verification status verified
+- delete session
+- send success_message
+
+IMPORTANT: Telegram bots cannot reliably inspect the cloud folder contents without OAuth.
+So implement:
+- strict host+folder pattern checks
+- uniqueness check
+- optional manual approval flow for stricter enforcement
+
+========================
+MANUAL APPROVAL BUTTONS (INLINE)
+========================
+Add optional rule: require_manual_approval boolean
+
+If require_manual_approval is true:
+- user submissions move session to status "needs_review" instead of auto-verified
+- bot posts an admin-only message in the group:
+  “Review verification for @user”
+  Include buttons:
+   ✅ Approve
+   ⛔ Reject/Ban
+   🔄 Reset attempts
+- Clicking buttons performs action immediately, logs admin_actions, updates verifications.admin_override
+
+Buttons must be implemented using Telegraf action handlers (callback_query).
+
+========================
+ADMIN COMMANDS (CHAT)
+========================
+Implement these commands for group admins or SUPERADMINS env list:
+
+/setsubject <text>  -> set groups.subject
+/setwelcome <text>  -> replace welcome message
+/addwelcome <text>  -> append to welcome message
+/setvideocount <n>
+/settimer <minutes>
+/setattempts <n>
+/enablelinks
+/disablelinks
+/manualapproval on|off
+/viewrules
+/approve <user_id|@username>
+/reject <user_id|@username>
+/reset <user_id|@username>
+/whitelist <user_id|@username>
+/exportcsv  -> bot uploads CSV file in chat
+
+Every admin action writes to admin_actions.
+
+========================
+WEB ADMIN DASHBOARD (EXPRESS)
+========================
+Create /src/web/server.js Express app that runs alongside the bot on Replit.
+
+Features:
+- Simple admin login using a single password from env: DASHBOARD_PASSWORD
+- Minimal UI pages (no heavy frontend frameworks)
+Routes:
+- GET /  -> login page if not authed, else dashboard
+- GET /groups -> list groups (group_id, title, subject)
+- GET /groups/:id -> view/edit rules + welcome message + subject
+- GET /logs?group_id= -> view recent verifications
+- GET /export?group_id= -> download CSV
+
+Auth:
+- cookie-based session (simple)
+- protect all routes except /login
+
+Keep it clean and lightweight.
+
+========================
+REPLIT-READY REQUIREMENTS
+========================
+- package.json must include start script
+- index.js should start both:
+  1) Telegram bot
+  2) Express dashboard (on process.env.PORT)
+
+- Provide .env.example with:
+  BOT_TOKEN
+  SUPABASE_URL
+  SUPABASE_SERVICE_ROLE_KEY
+  SUPERADMINS
+  DASHBOARD_PASSWORD
+  APP_ENV
+
+========================
+README (MUST BE DETAILED)
+========================
+Write README.md that explains:
+1) BotFather steps
+2) Supabase setup: run schema.sql
+3) Replit setup: Secrets, Run
+4) Add bot to group: set admin permissions (restrict/ban)
+5) How to set subject per group and edit messages
+6) How to use manual approval
+7) Dashboard usage + password
+8) Deployment notes (Railway/Render optional)
+
+========================
+OUTPUT RULES
+========================
+- Generate ALL files with full code.
+- No placeholders like “TODO”.
+- Use robust error handling.
+- Use best practices for Telegraf v4 and Supabase v2.
+- Keep the build fast: prioritize a working MVP with the above features first.
